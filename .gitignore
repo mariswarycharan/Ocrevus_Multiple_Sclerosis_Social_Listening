@@ -1,0 +1,6 @@
+Output/
+Testing/
+Data/
+__pycache__/
+.env
+venv_topic_modeling/
