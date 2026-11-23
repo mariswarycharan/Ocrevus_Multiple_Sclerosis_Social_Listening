@@ -4,3 +4,5 @@ Data/
 __pycache__/
 .env
 venv_topic_modeling/
+Sprinklr_Raw_Data_Month_Wise/
+Sprinklr_MS_Raw_Data/

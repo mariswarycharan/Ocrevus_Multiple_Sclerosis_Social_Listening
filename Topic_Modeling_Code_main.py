@@ -8,6 +8,8 @@ Modular architecture:
 
 Enhanced with:
     - Alternating 2-API-Key Strategy: Odd batches -> API Key 1, Even batches -> API Key 2
+    - Safety Fallback: API Key 3 activated if both Key 1 & Key 2 fail in retry protocol
+    - Configurable Output Columns: Global list to specify headers for final exported Excel
     - Fast pair execution with 2s inter-request delay and 10s rate-limit pacing between pairs
     - Dynamic Solo Retry Protocol with 10s recovery pause and alternate API key rotation
     - Strict Sequential Row-Order Preservation: Batch N is always applied before Batch N+1
@@ -64,15 +66,43 @@ RETRY_DELAY_SECONDS = 5.0
 
 # File & dataset configuration
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_FILENAME = str(BASE_DIR / "Data" / "Sampled_Twitter_Data_500.xlsx")
-SHEET_NAME = "Sheet1"
+INPUT_FILENAME = str(BASE_DIR / "Data" / "Unique_twiter_data_only_for_MS_classified_v2.xlsx")
+SHEET_NAME = "Classified"
 POST_ID_COLUMN = "Post_ID"
 TEXT_COLUMN = "Message"
-OUTPUT_FILENAME = str(BASE_DIR / "Output" / "Sample_Output_Topic_Modelling.xlsx")
-PROMPT_FILE_PATH = str(BASE_DIR / "prompts" / "MS_ocrevus_topic_classification_system_prompt.md")
+OUTPUT_FILENAME = str(BASE_DIR / "Output" / "output_ocrevus_ms_social_listening_classified.xlsx")
+PROMPT_FILE_PATH = str(BASE_DIR / "prompts" / "new_MS_ocrevus_topic_sentiment_voice_system_prompt.md")
+
+
+# Optional metadata columns that are attached to each post inside the prompt.
+# If the input file's header names change, only update these two values.
+ENTITY_BUCKET_COLUMN = "Entity Bucket"
+DRUG_MENTIONS_COLUMN = "Drug Mentions"
+
+# Entity Bucket values that must NOT be written into the prompt (compared case-insensitively
+# after normalising spaces around "/"). For these, the whole Entity Bucket line is skipped.
+ENTITY_BUCKET_SKIP_VALUES = {"noise/others", "Noise / Others", "noise", "others", "null"}
+
+# Classification result columns produced by LLM JSON output
+CLASSIFICATION_COLUMNS = [
+    "Speaker_Voice",
+    "Ocrevus_Sentiment",
+    "Competitor_Sentiment",
+    "MS_Sentiment",
+    "topics",
+    "theme",
+    "justification",
+]
+
+# Output Columns Configuration:
+# Specify the list of column header names from the input file to keep in the final output Excel file.
+# If set to None (or empty list []), all columns from the input Excel file will be included.
+# All classification columns (Speaker_Voice, Ocrevus_Sentiment, Competitor_Sentiment,
+# MS_Sentiment, topics, theme, justification) are always included in the final output.
+OUTPUT_COLUMNS: list[str] | None = None
 
 # Optional row subsetting for targeted testing (set to None to classify the entire dataset)
-ROW_INDICES: list[int] | None = [446]  # e.g., [0, 1, 2, 3, 4] to test the first 5 rows
+ROW_INDICES: list[int] | None = None  # e.g., [0, 1, 2, 3, 4] to test the first 5 rows
 
 # Batching & Rate-Limiting Configuration
 BATCH_SIZE = 10                      # Number of posts per LLM request
@@ -105,6 +135,8 @@ class BatchItem:
         # Odd batches -> Key 1 (index 0); Even batches -> Key 2 (index 1)
         self.primary_key_index = 0 if (batch_number % 2 == 1) else 1
         self.alternate_key_index = 1 if (batch_number % 2 == 1) else 0
+        # Final safety fallback key -> Key 3 (index 2)
+        self.fallback_key_index = 2
 
         self.is_fully_cached = False
         self.raw_response: str | None = None
@@ -120,6 +152,10 @@ class BatchItem:
     @property
     def alternate_key_label(self) -> str:
         return f"API Key {self.alternate_key_index + 1}"
+
+    @property
+    def fallback_key_label(self) -> str:
+        return f"API Key {self.fallback_key_index + 1} (Safety Fallback)"
 
 
 # ==============================================================================
@@ -143,6 +179,74 @@ def build_classification_prompt(prompt_template: str, posts_to_classify: str) ->
     if "{posts_to_classify}" in prompt_template:
         return prompt_template.replace("{posts_to_classify}", posts_to_classify)
     return f"{prompt_template.rstrip()}\n\n{posts_to_classify}"
+
+def _is_blank(value: Any) -> bool:
+    """True for NaN / None / empty / 'nan' / 'none' / 'null' / 'n/a' cell values."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return True
+    return str(value).strip().lower() in {"", "nan", "none", "null", "n/a", "na"}
+
+
+def clean_entity_bucket(value: Any) -> str:
+    """
+    Return the Entity Bucket text to include in the prompt, or "" if it must be skipped.
+      - Empty value                      -> "" (skipped)
+      - "Noise / Others"                 -> "" (skipped)
+      - "General MS (No Drug)"           -> "General MS" (the "(No Drug)" part is trimmed)
+      - Anything else (Ocrevus Only, Ocrevus vs. Competitor, Competitor Only) -> unchanged
+    """
+    if _is_blank(value):
+        return ""
+
+    text = re.sub(r"\s+", " ", str(value)).strip()
+
+    # Skip noise / others (e.g. "Noise / Others", "Noise/Others")
+    normalized = re.sub(r"\s*/\s*", "/", text).lower()
+    if normalized in ENTITY_BUCKET_SKIP_VALUES:
+        return ""
+
+    # Trim "(No Drug)" -> "General MS (No Drug)" becomes "General MS"
+    text = re.sub(r"\s*\(\s*no\s+drug\s*\)", "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
+def clean_drug_mentions(value: Any) -> str:
+    """
+    Return drug names as a clean comma-separated string, or "" if there are none.
+    Example: "Ocrevus,  Kesimpta ,Tysabri" -> "Ocrevus, Kesimpta, Tysabri"
+    """
+    if _is_blank(value):
+        return ""
+    drugs = [d.strip() for d in str(value).split(",") if d.strip()]
+    return ", ".join(drugs)
+
+
+def format_post_for_prompt(
+    post_id: Any,
+    text: str,
+    entity_bucket: Any = None,
+    drug_mentions: Any = None,
+) -> str:
+    """
+    Build one post block for the prompt in this order:
+    Post ID -> Entity Bucket -> Drugs mentioned -> Post content.
+    Entity Bucket / Drug lines are omitted entirely when there is no usable value.
+    """
+    block = f"--- Post ID: {post_id} ---\n\n"
+
+    bucket = clean_entity_bucket(entity_bucket)
+    if bucket:
+        block += f"This post belongs to entity bucket = {bucket}\n"
+
+    drugs = clean_drug_mentions(drug_mentions)
+    if drugs:
+        block += f"The drugs mentioned in this post are: {drugs}\n"
+
+    if bucket or drugs:
+        block += "\n"
+
+    block += f"Post content: \n{text}\n\n---\n\n"
+    return block
 
 
 # ==============================================================================
@@ -169,7 +273,17 @@ def load_input_data(
     else:
         df = pd.read_excel(path, sheet_name=sheet_name)
 
-    # df = df.head(10)
+    # Store original input file columns for the final export selection
+    df.attrs["input_columns"] = list(df.columns)
+
+    # df = df.head(20)
+
+    for optional_col in (ENTITY_BUCKET_COLUMN, DRUG_MENTIONS_COLUMN):
+        if optional_col not in df.columns:
+            console.print(
+                f"[yellow]⚠️ Column '{optional_col}' not found in input file. "
+                f"It will be skipped in the prompt.[/yellow]"
+            )
 
     if post_id_column not in df.columns:
         raise KeyError(
@@ -198,12 +312,9 @@ def load_input_data(
         df["post_id"] = df[post_id_column]
 
     # Initialize classification result columns
-    if "topics" not in df.columns:
-        df["topics"] = ""
-    if "theme" not in df.columns:
-        df["theme"] = ""
-    if "justification" not in df.columns:
-        df["justification"] = ""
+    for col in CLASSIFICATION_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
 
     console.print(f"[green]✅ Dataset loaded successfully: {len(df)} total rows ready for classification.[/green]")
     return df
@@ -242,20 +353,32 @@ def load_existing_checkpoint(
                 continue
             clean_pid_str = str(pid).strip()
             if clean_pid_str in prior_post_ids:
-                topic = str(row.get("topics", "") or "")
-                theme = str(row.get("theme", "") or "")
-                just = str(row.get("justification", "") or "")
-                if topic:
+                voice = str(row.get("Speaker_Voice", "") or row.get("speaker_voice", "") or "")
+                ocr_sent = str(row.get("Ocrevus_Sentiment", "") or row.get("ocrevus_sentiment", "") or "")
+                comp_sent = str(row.get("Competitor_Sentiment", "") or row.get("competitor_sentiment", "") or "")
+                ms_sent = str(row.get("MS_Sentiment", "") or row.get("ms_sentiment", "") or "")
+                topic = str(row.get("topics", "") or row.get("Topic", "") or "")
+                theme = str(row.get("theme", "") or row.get("Theme", "") or "")
+                just = str(row.get("justification", "") or row.get("Justification", "") or "")
+                if topic or voice or ocr_sent:
                     if clean_pid_str.isdigit():
                         mask = (df[post_id_column] == int(clean_pid_str)) | (df[post_id_column].astype(str) == clean_pid_str)
                     else:
                         mask = df[post_id_column].astype(str) == clean_pid_str
+                    df.loc[mask, "Speaker_Voice"] = voice
+                    df.loc[mask, "Ocrevus_Sentiment"] = ocr_sent
+                    df.loc[mask, "Competitor_Sentiment"] = comp_sent
+                    df.loc[mask, "MS_Sentiment"] = ms_sent
                     df.loc[mask, "topics"] = topic
                     df.loc[mask, "theme"] = theme
                     df.loc[mask, "justification"] = just
                     txt = str(row.get(text_column, "") or "").strip()
                     if txt:
                         classification_cache[txt] = {
+                            "speaker_voice": voice,
+                            "ocrevus_sentiment": ocr_sent,
+                            "competitor_sentiment": comp_sent,
+                            "ms_sentiment": ms_sent,
                             "topic": topic,
                             "theme": theme,
                             "justification": just,
@@ -356,7 +479,7 @@ def apply_batch_results(
 ) -> bool:
     """
     Validate parsed JSON batch results, update the deduplication cache, and write
-    assigned topics, themes, and justifications into the master DataFrame in exact post order.
+    assigned speaker voice, sentiments, topics, themes, and justifications into the master DataFrame in exact post order.
     """
     try:
         for post_id, data in batch_results.items():
@@ -365,9 +488,55 @@ def apply_batch_results(
                     f"Expected dict for post_id '{post_id}', got {type(data).__name__}"
                 )
 
-            topic = data.get("topic", "No topic assigned")
-            theme = data.get("theme", "No theme assigned")
-            justification = data.get("justification", "No justification provided.")
+            speaker_voice = str(
+                data.get("Speaker_Voice")
+                or data.get("speaker_voice")
+                or data.get("speaker voice")
+                or data.get("Speaker Voice")
+                or ""
+            ).strip()
+
+            ocrevus_sentiment = str(
+                data.get("Ocrevus_Sentiment")
+                or data.get("ocrevus_sentiment")
+                or data.get("ocreverse sentiment")
+                or data.get("Ocrevus Sentiment")
+                or ""
+            ).strip()
+
+            competitor_sentiment = str(
+                data.get("Competitor_Sentiment")
+                or data.get("competitor_sentiment")
+                or data.get("Competitor Sentiment")
+                or ""
+            ).strip()
+
+            ms_sentiment = str(
+                data.get("MS_Sentiment")
+                or data.get("ms_sentiment")
+                or data.get("ms sentiment")
+                or data.get("MS Sentiment")
+                or ""
+            ).strip()
+
+            topic = str(
+                data.get("Topic")
+                or data.get("topic")
+                or data.get("topics")
+                or "No topic assigned"
+            ).strip()
+
+            theme = str(
+                data.get("Theme")
+                or data.get("theme")
+                or "No theme assigned"
+            ).strip()
+
+            justification = str(
+                data.get("Justification")
+                or data.get("justification")
+                or "No justification provided."
+            ).strip()
 
             clean_str_pid = str(post_id).strip()
             numeric_pid = int(clean_str_pid) if clean_str_pid.isdigit() else None
@@ -380,6 +549,10 @@ def apply_batch_results(
 
             if original_text:
                 classification_cache[original_text] = {
+                    "speaker_voice": speaker_voice,
+                    "ocrevus_sentiment": ocrevus_sentiment,
+                    "competitor_sentiment": competitor_sentiment,
+                    "ms_sentiment": ms_sentiment,
                     "topic": topic,
                     "theme": theme,
                     "justification": justification,
@@ -391,6 +564,10 @@ def apply_batch_results(
             else:
                 mask = df[post_id_column].astype(str) == clean_str_pid
 
+            df.loc[mask, "Speaker_Voice"] = speaker_voice
+            df.loc[mask, "Ocrevus_Sentiment"] = ocrevus_sentiment
+            df.loc[mask, "Competitor_Sentiment"] = competitor_sentiment
+            df.loc[mask, "MS_Sentiment"] = ms_sentiment
             df.loc[mask, "topics"] = topic
             df.loc[mask, "theme"] = theme
             df.loc[mask, "justification"] = justification
@@ -406,6 +583,10 @@ def apply_batch_results(
                 else:
                     mask = df[post_id_column].astype(str) == clean_pid_str
 
+                df.loc[mask, "Speaker_Voice"] = cached.get("speaker_voice", "")
+                df.loc[mask, "Ocrevus_Sentiment"] = cached.get("ocrevus_sentiment", "")
+                df.loc[mask, "Competitor_Sentiment"] = cached.get("competitor_sentiment", "")
+                df.loc[mask, "MS_Sentiment"] = cached.get("ms_sentiment", "")
                 df.loc[mask, "topics"] = cached["topic"]
                 df.loc[mask, "theme"] = cached["theme"]
                 df.loc[mask, "justification"] = cached["justification"]
@@ -440,13 +621,39 @@ def save_results_to_excel(
     post_id_column: str = "post_id",
     preview: bool = True,
     is_checkpoint: bool = False,
+    output_columns: list[str] | None = None,
 ) -> None:
     """
     Atomic Excel export writing to a temporary file before renaming, ensuring that
     even if an interruption or crash occurs mid-write, data is never corrupted.
+    Respects OUTPUT_COLUMNS configuration for including specified headers from the input file.
     """
     output_path = Path(output_filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    target_columns = OUTPUT_COLUMNS if output_columns is None else output_columns
+    original_input_cols = df.attrs.get(
+        "input_columns",
+        [c for c in df.columns if c not in CLASSIFICATION_COLUMNS and c != "post_id"]
+    )
+
+    if target_columns is not None and len(target_columns) > 0:
+        # Keep user-specified columns from the list that exist in the DataFrame
+        selected_cols = [col for col in target_columns if col in df.columns]
+        missing_cols = [col for col in target_columns if col not in df.columns]
+        if missing_cols and preview:
+            console.print(f"[dim yellow]Notice: Specified output columns not found in dataset: {missing_cols}[/dim yellow]")
+    else:
+        # If None / null / empty, keep all original columns from the input Excel file
+        selected_cols = [col for col in original_input_cols if col in df.columns]
+
+    # Always ensure all classification result columns are included
+    final_export_cols: list[str] = list(selected_cols)
+    for col in CLASSIFICATION_COLUMNS:
+        if col in df.columns and col not in final_export_cols:
+            final_export_cols.append(col)
+
+    export_df = df[final_export_cols]
 
     llm_call_failed_df = pd.DataFrame(llm_call_failed_records)
     json_parse_failed_df = pd.DataFrame(json_parse_failed_records)
@@ -464,7 +671,7 @@ def save_results_to_excel(
 
     def _write_workbook(target: Path) -> None:
         with pd.ExcelWriter(target, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Master Data", index=False)
+            export_df.to_excel(writer, sheet_name="Master Data", index=False)
 
             if not llm_call_failed_df.empty:
                 llm_call_failed_df.to_excel(writer, sheet_name="LLM Call Failed", index=False)
@@ -508,6 +715,7 @@ def save_results_to_excel(
         summary_table.add_row("LLM Call Failed", f"{len(llm_call_failed_df)} posts")
         summary_table.add_row("JSON Parsing Failed", f"{len(json_parse_failed_df)} posts")
         summary_table.add_row("Output Workbook", str(output_path.resolve()))
+        summary_table.add_row("Exported Columns", ", ".join(final_export_cols))
         console.print(summary_table)
 
     elif is_checkpoint:
@@ -609,10 +817,10 @@ def solo_retry_batch(
     task_id: Any,
 ) -> bool:
     """
-    Dynamic Solo Retry Protocol:
+    Dynamic Solo Retry & Safety Fallback Protocol:
       1. Wait RETRY_SOLO_DELAY_SECONDS (10s) recovery pause.
-      2. Retry the failed batch alone using its alternate API key.
-      3. If needed, attempt once more before marking as failed.
+      2. Retry the failed batch alone alternating between the two primary keys (Key 1 & Key 2).
+      3. If both Key 1 and Key 2 fail, activate the safety fallback to API Key 3 (GEMINI_API_KEY_3).
     """
     console.print(
         f"\n[bold yellow]⚠️ SOLO RETRY PROTOCOL ACTIVATED for Batch {batch.batch_number}[/bold yellow]\n"
@@ -651,7 +859,31 @@ def solo_retry_batch(
         if attempt < MAX_SOLO_RETRIES:
             time.sleep(5.0)
 
-    console.print(f"[bold red]❌ Batch {batch.batch_number} could not be recovered after solo retries. Marking failed.[/bold red]")
+    # --------------------------------------------------------------------------
+    # FINAL SAFETY FALLBACK: Both primary & alternate keys (Key 1 & Key 2) failed.
+    # Retry with the 3rd API key (GEMINI_API_KEY_3, index 2) as final safety fallback.
+    # --------------------------------------------------------------------------
+    console.print(
+        f"\n[bold magenta]🚨 FINAL FALLBACK PROTOCOL ACTIVATED for Batch {batch.batch_number}[/bold magenta]\n"
+        f"[magenta]Both primary and alternate keys (Key 1 & Key 2) failed.\n"
+        f"Switching to safety fallback: {batch.fallback_key_label}...[/magenta]"
+    )
+    progress.update(task_id, status=f"Safety fallback Batch {batch.batch_number} ({batch.fallback_key_label})")
+    time.sleep(5.0)
+
+    fallback_success = execute_batch_call(
+        batch=batch,
+        key_index=batch.fallback_key_index,
+        system_prompt_template=system_prompt_template,
+    )
+
+    if fallback_success:
+        console.print(
+            f"[bold green]🎉 Batch {batch.batch_number} RECOVERED successfully on safety fallback ({batch.fallback_key_label})![/bold green]"
+        )
+        return True
+
+    console.print(f"[bold red]❌ Batch {batch.batch_number} could not be recovered after retries and Key 3 fallback. Marking failed.[/bold red]")
     return False
 
 
@@ -733,6 +965,7 @@ def main() -> None:
     # 1. Load the external system prompt
     try:
         system_prompt_template = load_system_prompt(PROMPT_FILE_PATH)
+        
     except Exception as exc:
         console.print(f"[bold red]❌ Could not load system prompt: {exc}[/bold red]")
         return
@@ -799,6 +1032,10 @@ def main() -> None:
 
             if text in classification_cache:
                 cached = classification_cache[text]
+                df.at[row_idx, "Speaker_Voice"] = cached.get("speaker_voice", "")
+                df.at[row_idx, "Ocrevus_Sentiment"] = cached.get("ocrevus_sentiment", "")
+                df.at[row_idx, "Competitor_Sentiment"] = cached.get("competitor_sentiment", "")
+                df.at[row_idx, "MS_Sentiment"] = cached.get("ms_sentiment", "")
                 df.at[row_idx, "topics"] = cached["topic"]
                 df.at[row_idx, "theme"] = cached["theme"]
                 df.at[row_idx, "justification"] = cached["justification"]
@@ -815,10 +1052,11 @@ def main() -> None:
             batch_item.post_id_map[pid] = text
 
             if text not in seen_in_batch:
-                batch_item.posts_to_classify += (
-                    f"--- Post ID: {pid} --- \n\n"
-                    f"Post content: \n{text}\n\n"
-                    f"---\n\n"
+                batch_item.posts_to_classify += format_post_for_prompt(
+                    post_id=pid,
+                    text=text,
+                    entity_bucket=row.get(ENTITY_BUCKET_COLUMN),
+                    drug_mentions=row.get(DRUG_MENTIONS_COLUMN),
                 )
                 seen_in_batch.add(text)
 
@@ -837,14 +1075,19 @@ def main() -> None:
     total_pairs = len(batch_pairs)
 
     # Display Rich Configuration Dashboard Banner
+    output_cols_desc = (
+        ", ".join(OUTPUT_COLUMNS) if OUTPUT_COLUMNS is not None and len(OUTPUT_COLUMNS) > 0
+        else "All input columns (null/None)"
+    )
     console.print(
         Panel.fit(
             f"[bold cyan]SLE Social Media Topic Modeling Pipeline[/bold cyan]\n"
             f"[white]Platform:[/] [green]{LLM_PLATFORM}[/]  |  [white]Model:[/] [green]{active_model}[/]\n"
             f"[white]Dataset Rows:[/] {len(df)}  |  [white]Batch Size:[/] {BATCH_SIZE} posts\n"
             f"[white]Total Batches:[/] {total_batches}  |  [white]Batch Pairs:[/] {total_pairs}  |  [white]Start Batch:[/] {START_BATCH}\n"
-            f"[white]Alternating Strategy:[/] Odd Batches -> [bold magenta]API Key 1[/bold magenta]  |  Even Batches -> [bold cyan]API Key 2[/bold cyan]\n"
+            f"[white]Alternating Strategy:[/] Odd Batches -> [bold magenta]API Key 1[/bold magenta]  |  Even Batches -> [bold cyan]API Key 2[/bold cyan]  |  Fallback -> [bold yellow]API Key 3[/bold yellow]\n"
             f"[white]Pacing Config:[/] Inter-request: {INTER_REQUEST_DELAY_SECONDS}s  |  Pair Delay: {PAIR_DELAY_SECONDS}s  |  Solo Retry Delay: {RETRY_SOLO_DELAY_SECONDS}s\n"
+            f"[white]Output Columns:[/] {output_cols_desc}\n"
             f"[white]Continuous Auto-Save:[/] Enabled -> [bold green]{OUTPUT_FILENAME}[/bold green]",
             title="[bold yellow]System Configuration[/bold yellow]",
             border_style="cyan",

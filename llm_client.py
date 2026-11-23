@@ -194,8 +194,16 @@ def _execute_with_retry(
     last_error: str | None = None
 
     for attempt in range(1, max_retries + 1):
-        # Rotate starting from api_key_index, wrapping around available keys
-        key_idx = (api_key_index + attempt - 1) % len(api_keys)
+        # Rotate starting from api_key_index:
+        # When 3+ keys exist and alternating between Key 1 & Key 2 (indices 0 and 1),
+        # keep standard retries strictly between Key 1 & Key 2 so Key 3 remains a dedicated fallback.
+        if len(api_keys) > 2 and api_key_index in (0, 1):
+            key_idx = (api_key_index + attempt - 1) % 2
+        elif len(api_keys) > 2 and api_key_index >= 2:
+            key_idx = min(api_key_index, len(api_keys) - 1)
+        else:
+            key_idx = (api_key_index + attempt - 1) % len(api_keys)
+
         active_key = api_keys[key_idx]
         key_label = f"Key {key_idx + 1}"
         try:
@@ -236,7 +244,12 @@ def _execute_with_retry(
             print(f"❌ Attempt {attempt}/{max_retries} failed for {platform_label} ({key_label}): {last_error}", flush=True)
 
         if attempt < max_retries and retry_delay > 0:
-            next_key_idx = (api_key_index + attempt) % len(api_keys)
+            if len(api_keys) > 2 and api_key_index in (0, 1):
+                next_key_idx = (api_key_index + attempt) % 2
+            elif len(api_keys) > 2 and api_key_index >= 2:
+                next_key_idx = min(api_key_index, len(api_keys) - 1)
+            else:
+                next_key_idx = (api_key_index + attempt) % len(api_keys)
             print(f"🔄 Retrying (fallback attempt {attempt + 1}) using Key {next_key_idx + 1} in {retry_delay}s...", flush=True)
             time.sleep(retry_delay)
 
@@ -445,8 +458,8 @@ def call_gemini_llm(
     Call Google Gemini via Google's OpenAI-compatible endpoint using the `openai` SDK.
 
     Stateless by design: every call sends only the current prompt without history.
-    Reads GEMINI_API_KEY_1 / GEMINI_API_KEY_2 and GEMINI_BASE_URL from environment/.env.
-    Supports alternating starting key via api_key_index (0 for Key 1, 1 for Key 2).
+    Reads GEMINI_API_KEY_1 / GEMINI_API_KEY_2 / GEMINI_API_KEY_3 and GEMINI_BASE_URL from environment/.env.
+    Supports alternating starting key via api_key_index (0 for Key 1, 1 for Key 2, 2 for Fallback Key 3).
     """
     resolved_base_url = (
         base_url

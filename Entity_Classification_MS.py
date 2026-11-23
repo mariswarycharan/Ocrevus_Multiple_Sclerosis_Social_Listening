@@ -134,7 +134,7 @@ OUR_BRAND_LABEL = "Ocrevus"          # used in bucket names and reasons
 INPUT_TEXT_COLUMN: Optional[str] = None   # None = auto-detect
 TEXT_COLUMN_CANDIDATES = [
     "post content", "twitter post content", "tweet content", "post_content",
-    "tweet", "tweet text", "Message", "text", "full_text", "content", "post",
+    "tweet", "tweet text", "message", "text", "full_text", "content", "post",
     "body", "snippet",
 ]
 CLEAN_TEXT_COLUMN = "Cleaned Post Content"
@@ -145,7 +145,9 @@ REASON_COLUMN = "Reason"
 # Internal scores (MS Score, Noise Score ...) are NOT written to the output.
 # Switch this on only if you want to tune thresholds.
 WRITE_INTERNAL_SCORE_COLUMNS = False
-LOW_CONFIDENCE_THRESHOLD = 0.60       # rows below go to "Low Confidence Review"
+LOW_CONFIDENCE_THRESHOLD = 0.75       # rows below go to "Low Confidence Review"
+# v2: was 0.60 - no row ever scored below 0.60 and the 0.60-0.75 band was only
+# ~54% accurate in the manual review, so that band now goes to review.
 # Drugs used for a non-MS disease (e.g. "rituximab for lymphoma") are ignored
 # for the bucket. Should they still be listed in "Drug Mentions"?
 DRUG_MENTIONS_INCLUDE_NON_MS_USE = False
@@ -286,7 +288,9 @@ EXTENDED_COMPETITOR_DRUGS: Dict[str, dict] = {
         "names": ["interferon beta", "beta interferon", "interferon beta 1a",
                   "interferon", "interferons", "ifn beta", "ifnb"],
         "misspelling_regex": [r"[iy]nt[ae]rf[ae]r[oa]ns?(?![a-z])"],
-        "context_names": ["ifn"],
+        # v2: bare "ifn" removed - in this data it was always IFN-gamma (a cytokine).
+        # "ifn beta" / "ifnb" (names above) are still matched.
+        "context_names": [],
         "ms_specific": False, "requires_ms_context": True},     # hepatitis, cancer
     "Rituxan": {"names": ["rituxan", "rituximab", "truxima", "ruxience",
                           "riabni", "mabthera", "ritux"],
@@ -366,7 +370,11 @@ MS_HINT_KEYWORDS: Dict[str, float] = {
     r"demyelinat\w*|remyelinat\w*|myelin": 2.0,
     r"optic neuritis|lhermitte'?s?|uhthoff'?s?|ms hug|edss|pseudo ?relapses?|"
     r"pseudo ?exacerbations?": 2.5,
-    r"disease modifying\w*|dmts?|high efficacy (?:therapy|treatment|dmt)s?": 2.0,
+    # v2: "therapies" was not matched by the old "(?:therapy|...)s?"
+    r"disease modifying\w*|dmts?|high efficacy (?:therap(?:y|ies)|treatments?|dmts?)": 2.0,
+    # v2: trial / clinical progression language (CAR-T, BTKi, anti-CD20 read-outs)
+    r"(?:confirmed )?disability (?:scores?|progression|worsening|accumulation)|"
+    r"progression independent of relapse|annuali[sz]ed relapse rates?": 1.5,
     r"(?:brain|spinal|spine|cervical|thoracic|new|active|enhancing|"
     r"gadolinium|gad|t1|t2|black hole|periventricular|juxtacortical) lesions?|"
     r"lesion load|lesions? on my (?:brain|spine|mri)": 2.0,
@@ -374,7 +382,8 @@ MS_HINT_KEYWORDS: Dict[str, float] = {
     r"jc ?virus|jcv|pml risk|pml": 2.0,
     r"b ?cell depletion|anti ?cd20|cd20|btk inhibitors?|tolebrutinib|"
     r"fenebrutinib|evobrutinib|remibrutinib|frexalimab": 2.0,
-    r"transverse myelitis|neuroimmunolog\w*|ahsct|hsct": 2.0,
+    r"neuroimmunolog\w*|ahsct|hsct": 2.0,
+    r"transverse myelitis": 1.5,   # v2: was 2.0 - TM is its own condition, must not decide MS alone
     r"wahls(?: protocol)?|swank diet|overcoming ms": 2.0,
     # MS hug / band-like sensation, symptom descriptions without the word MS
     r"squeez\w* (?:around |across )?(?:my )?(?:ribs?|rib cage|chest|torso|waist)|"
@@ -474,6 +483,14 @@ MS_DISEASE_PREV_STRONG = {
     "battling", "battle", "suffering", "suffer", "suffers", "lives",
     "remitting", "secondary", "primary", "tumefactive", "pwms", "cursed",
 }
+# v2: two-word look-back that is a STRONG disease context ("Ms Blair suffers
+# from MS": "from" alone is only weak, so a title elsewhere used to win).
+MS_DISEASE_PREV2_STRONG = {
+    "suffers from", "suffering from", "suffer from", "suffered from",
+    "diagnosed with", "living with", "lives with", "lived with", "battling with",
+    "struggling with", "struggles with", "fighting with", "died from", "died of",
+    "complications of", "complications from", "symptoms of", "diagnosis of",
+}
 MS_DISEASE_PREV_WEAK = {
     "has", "had", "our", "your", "their", "of", "about", "from", "like",
     "thanks", "because", "cause", "and", "world", "national", "walk", "bike",
@@ -504,7 +521,9 @@ MS_NOISE_NEXT_WORDS: Dict[str, Set[str]] = {
         "aspirants", "abroad", "cs", "ds", "ortho", "orthopaedics",
         "orthopedics", "ent", "obg", "obgyn", "ophthalmology", "anatomy",
         "surgery", "gen", "graduate", "grad", "finance", "analytics", "mis",
-        "ece", "eee", "ee", "me", "mech", "civil", "bme", "cse", "it",
+        "ece", "eee", "ee", "mech", "civil", "bme", "cse",
+        # v2: "it" and "me" removed - ordinary words ("MS. It is...", "have MS, it
+        # could..."). Upper-case "MS IT" / "MS ME" are in NOISE_CASE_SENSITIVE.
     },
     "mild steel": {
         "pipe", "pipes", "rod", "rods", "sheet", "sheets", "plate", "plates",
@@ -650,6 +669,7 @@ NOISE_KEYWORDS: Dict[str, Dict[str, float]] = {
 NOISE_CASE_SENSITIVE: Dict[str, Tuple[str, float]] = {
     r"\bMs\.\s?[A-Z][a-z]+": ("Ms. (title) / pop culture", 3.0),          # Ms. Smith
     r"\bMS-?0[1-4]\b": ("Mississippi (US state)", 1.5),                     # districts
+    r"\bMS\s(?:in\s)?(?:IT|ME)\b": ("Master's degree (MS/MSc)", 3.0),        # v2: "MS IT", "MS in ME"
     r"\b[A-Z][a-z]+,\s?MS\b(?!\s+(?:patient|warrior|symptom|fatigue))": ("Mississippi (US state)", 1.0),
     r"\b(?:AL|AR|LA|TN|GA|FL|TX|AZ|OK|KY|MO)\s*(?:,|/|&|and)\s*MS\b|"
     r"\bMS\s*(?:,|/|&|and)\s*(?:AL|AR|LA|TN|GA|FL|TX|AZ|OK|KY|MO)\b": ("Mississippi (US state)", 3.0),
@@ -664,6 +684,16 @@ NON_MS_INDICATION_KEYWORDS: Dict[str, float] = {
     r"chemo\w*|oncolog\w*|cancer|tumou?rs?": 1.5,
 }
 NON_MS_INDICATION_THRESHOLD = 2.5
+# v2: for MS-specific brands the other disease must be LINKED to the brand
+# ("ofatumumab for CLL", "lymphoma patients treated with ...").
+OFF_LABEL_LINK_AFTER_RE = re.compile(
+    r"^\W*(?:\([^)]{0,30}\)\W*)?(?:is |was |being |been )?(?:used |approved |given |prescribed )?"
+    r"(?:for|in|to treat|treating|against)\b")
+OFF_LABEL_LINK_BEFORE_RE = re.compile(
+    r"(?:patients?|people|pts)?\s*(?:treated with|treatment with|therapy with|on|receiving|using)\W*$")
+# v2: a short form ("tec", "ocr") needs at least this much treatment context
+# within PROXIMITY_CHARS of it (unless another drug is reliably named).
+SHORT_FORM_LOCAL_CONTEXT = 1.0
 
 # ----------------------------------- 8. DRUG / TREATMENT CONTEXT ------------
 # "The post is ABOUT treatment" – infusion, dose, side effects, cost ...
@@ -684,7 +714,7 @@ DRUG_FOCUS_KEYWORDS: Dict[str, float] = {
     r"vaccin\w*|booster": 0.75,
     r"approv\w*|fda|ema|mhra|nice|chmp|label|indication|launch\w*|rollout|"
     r"available now|now available": 2.0,
-    r"price\w*|cost\w*|expensive|afford\w*|co ?pays?|insurance|insurer|"
+    r"price\w*|costs?|costly|costing|expensive|afford\w*|co ?pays?|insurance|insurer|"
     r"coverage|covered|prior auth\w*|formulary|denied|reimburs\w*|"
     r"patient assistance|copay card|medicare|medicaid": 1.5,
     r"efficacy|effective\w*|trials?|phase (?:3|iii|2|ii)|"
@@ -1308,6 +1338,7 @@ class EntityClassifier:
         """Classify every standalone MS/Ms/ms token.
         Returns (disease_score, noise_score, notes, noise_categories, kinds)."""
         disease, noise, notes, noise_cats, kinds = 0.0, 0.0, [], [], []
+        dnotes: List[str] = []   # v2: disease-context notes only (used in the Reason)
         toks = [(m.group(0), m.start(), m.end()) for m in _CASED_TOKEN_RE.finditer(cased)]
         lowers = [t[0].lower() for t in toks]
         hashtag_ms = bool(re.search(r"#MS\b", raw_clean, re.I))
@@ -1320,6 +1351,7 @@ class EntityClassifier:
             nxt2 = " ".join(lowers[i + 1:i + 3])
             nxt_raw = toks[i + 1][0] if i + 1 < len(toks) else ""
             prv = lowers[i - 1] if i > 0 else ""
+            prv2 = " ".join(lowers[i - 2:i]) if i > 1 else ""   # v2: "suffers from"
             # digit directly before MS ("200 ms") only when nothing is between them
             prv_adjacent_digit = i > 0 and prv.isdigit() and cased[toks[i - 1][2]:s].strip() == ""
             window = set(lowers[max(0, i - MS_NOISE_WINDOW):i] + lowers[i + 1:i + 1 + MS_NOISE_WINDOW])
@@ -1330,9 +1362,16 @@ class EntityClassifier:
             if nxt in self._noise_next or nxt2 in MS_NOISE_NEXT_BIGRAMS:
                 cat = self._noise_next.get(nxt, "Master's degree (MS/MSc)")
                 noise += W_MS_NOISE_OCCURRENCE; notes.append(f"'{tok} {nxt_raw}'"); noise_cats.append(cat)
-            elif nxt in MS_DISEASE_NEXT_STRONG or prv in MS_DISEASE_PREV_STRONG:
+            elif nxt in MS_DISEASE_NEXT_STRONG or prv in MS_DISEASE_PREV_STRONG \
+                    or prv2 in MS_DISEASE_PREV2_STRONG:
                 disease += W_MS_CONTEXT_DISEASE
-                notes.append(f"'{tok} {nxt_raw}'" if nxt in MS_DISEASE_NEXT_STRONG else f"'{toks[i-1][0]} {tok}'")
+                if nxt in MS_DISEASE_NEXT_STRONG:
+                    notes.append(f"'{tok} {nxt_raw}'")
+                elif prv in MS_DISEASE_PREV_STRONG:
+                    notes.append(f"'{toks[i-1][0]} {tok}'")
+                else:
+                    notes.append(f"'{toks[i-2][0]} {toks[i-1][0]} {tok}'")
+                dnotes.append(notes[-1])
                 kinds.append("context")
             elif prv in self._noise_prev or prv_adjacent_digit:
                 cat = self._noise_prev.get(prv, "milliseconds / latency")
@@ -1350,16 +1389,40 @@ class EntityClassifier:
             elif nxt in MS_DISEASE_NEXT_WEAK or prv in MS_DISEASE_PREV_WEAK:
                 disease += W_MS_WEAK_CONTEXT
                 notes.append(f"'{tok} {nxt_raw}'" if nxt in MS_DISEASE_NEXT_WEAK else f"'{toks[i-1][0]} {tok}'")
+                dnotes.append(notes[-1])
                 kinds.append("weak")
             elif tok_core == "MS":
                 disease += W_MS_HASHTAG if hashtag_ms else W_MS_UPPER_DEFAULT
                 notes.append("'#MS'" if hashtag_ms else "'MS'")
+                dnotes.append(notes[-1])
                 kinds.append("hashtag" if hashtag_ms else "bare")
             elif tok_core == "Ms":
                 disease += W_MS_TITLE_DEFAULT; notes.append("'Ms' (ambiguous)"); kinds.append("bare")
+                dnotes.append(notes[-1])
             else:
                 disease += W_MS_LOWER_DEFAULT; notes.append("'ms' (ambiguous)"); kinds.append("bare")
-        return disease, noise, notes, noise_cats, kinds
+                dnotes.append(notes[-1])
+        return disease, noise, notes, noise_cats, kinds, dnotes
+
+    # v2 helpers ---------------------------------------------------------------
+    def _local_focus(self, norm: str, d: "DrugMention") -> float:
+        """Treatment-context score in a +-PROXIMITY_CHARS window around one mention."""
+        tag = " ourdrug " if d.group == "our" else " compdrug "
+        win = (norm[max(0, d.start - PROXIMITY_CHARS):d.start] + tag +
+               norm[d.end:d.end + PROXIMITY_CHARS])
+        return self.focus.score(win)[0]
+
+    def _local_off_label_link(self, norm: str, d: "DrugMention") -> bool:
+        """True when a non-MS disease is explicitly tied to THIS mention:
+        '<drug> for/in/to treat <disease>' or '<disease> patients treated with <drug>'."""
+        after = norm[d.end:d.end + PROXIMITY_CHARS]
+        before = norm[max(0, d.start - PROXIMITY_CHARS):d.start]
+        m = OFF_LABEL_LINK_AFTER_RE.match(after)
+        if m and self.non_ms.score(after[m.end():])[0] >= NON_MS_INDICATION_THRESHOLD:
+            return True
+        m = OFF_LABEL_LINK_BEFORE_RE.search(before)
+        return bool(m and self.non_ms.score(before[:m.start()][-PROXIMITY_CHARS:])[0]
+                    >= NON_MS_INDICATION_THRESHOLD)
 
     def _sclerosis_fuzzy(self, norm: str) -> float:
         """Fuzzy 'multiple sclerosis' (mulitple sclerosus, multiple sclerossis)."""
@@ -1393,7 +1456,8 @@ class EntityClassifier:
             strong = self._sclerosis_fuzzy(norm)
             if strong:
                 strong_hits = ["multiple sclerosis (misspelt)"]
-        ms_tok_dis, ms_tok_noise, ms_notes, ms_noise_cats, ms_kinds = self._ms_tokens(cased, clean_text)
+        ms_tok_dis, ms_tok_noise, ms_notes, ms_noise_cats, ms_kinds, ms_dnotes = \
+            self._ms_tokens(cased, clean_text)
         hint, hint_max, hint_hits = self.ms_hints.score(norm)
 
         # -------------------------------------------------- noise evidence --
@@ -1406,6 +1470,7 @@ class EntityClassifier:
         if strong == 0 and bare_only and n_kw + n_cs >= 1.0:
             noise_total += 1.5
             ms_tok_dis = 0.0
+            ms_dnotes = []
             ms_notes.append("(bare 'MS' discounted: non-MS meaning in text)")
         ms_evidence = strong + ms_tok_dis
         ms_signal_any = ms_evidence + hint
@@ -1428,6 +1493,12 @@ class EntityClassifier:
             if d.method in ("fuzzy2", "short"):
                 ctx_ok = (ms_signal_any >= WEAK_MATCH_MS_CONTEXT or focus0 >= WEAK_MATCH_DRUG_CONTEXT
                           or has_reliable)
+                # v2: a SHORT form ("tec", "ocr") also needs treatment words right next
+                # to it (or another reliably named drug). A general MS signal elsewhere
+                # in a long post is not enough: "not 'cool tec.'" in a post that lists
+                # "advanced multiple sclerosis" was read as Tecfidera.
+                if d.method == "short" and not has_reliable:
+                    ctx_ok = self._local_focus(norm, d) >= SHORT_FORM_LOCAL_CONTEXT
                 if not ctx_ok or noise_total > ms_signal_any + focus0:
                     dropped.append((d, "weak match without MS/treatment context"))
                     continue
@@ -1439,6 +1510,11 @@ class EntityClassifier:
                 non_ms > ms_signal_any * (1.0 if cfg.get("ms_specific") else 0.6)
             if cfg.get("ms_specific") and ms_signal_any > 0:
                 off_label = False
+            # v2: an MS-specific brand is only "off-label" when the other disease is
+            # mentioned NEAR it. In a pharma earnings post "myeloma drug Darzalex and
+            # Novartis's Kesimpta", the myeloma belongs to Darzalex, not Kesimpta.
+            if off_label and cfg.get("ms_specific"):
+                off_label = self._local_off_label_link(norm, d)
             if off_label:
                 dropped.append((d, "used for a non-MS condition (" + ", ".join(non_ms_hits[:3]) + ")"))
                 continue
@@ -1473,7 +1549,8 @@ class EntityClassifier:
         if not mentions:
             return self._classify_no_drug(res, norm, strong, strong_hits, ms_evidence, ms_kinds,
                                           ms_notes, hint, hint_max, hint_hits, noise_total,
-                                          noise_cats_all, noise_examples, dropped, dropped_txt)
+                                          noise_cats_all, noise_examples, dropped, dropped_txt,
+                                          ms_dnotes)
 
         # ================= DRUG PRESENT → drug buckets ========================
         masked = self._mask(norm, mentions)
@@ -1539,9 +1616,8 @@ class EntityClassifier:
         res.confidence = conf = _clip(conf)
 
         ctx_bits = []
-        if strong_hits or ms_notes:
-            ctx_bits.append("MS named: " + _quote_list(strong_hits + [n.strip("'") for n in ms_notes
-                                                                      if not n.startswith("(")], 3))
+        if strong_hits or ms_dnotes:   # v2: disease-context notes only (no noise notes)
+            ctx_bits.append("MS named: " + _quote_list(strong_hits + [n.strip("'") for n in ms_dnotes], 3))
         if hint_hits:
             ctx_bits.append("MS clinical terms: " + _quote_list(hint_hits, 4))
         if focus_hits:
@@ -1575,11 +1651,13 @@ class EntityClassifier:
     # ------------------------------------------------------ no-drug path ----
     def _classify_no_drug(self, res, norm, strong, strong_hits, ms_evidence, ms_kinds, ms_notes,
                           hint, hint_max, hint_hits, noise_total, noise_cats, noise_examples,
-                          dropped, dropped_txt):
+                          dropped, dropped_txt, ms_dnotes=None):
         B = self.buckets
         other, _, other_hits = self.other_cond.score(norm)
         total_ms = ms_evidence + hint
         ms_named = [n for n in ms_notes if not n.startswith("(")]
+        # v2: MS evidence quoted in the Reason = disease-context notes only
+        ms_dis = list(ms_dnotes) if ms_dnotes is not None else ms_named
         noise_meaning = ""
         if noise_cats:
             top = max(set(noise_cats), key=noise_cats.count)
@@ -1611,8 +1689,8 @@ class EntityClassifier:
             ev = []
             if strong_hits:
                 ev.append("MS terms " + _quote_list(strong_hits, 4))
-            if ms_named:
-                ev.append("MS usage " + ", ".join(ms_named[:3]))
+            if ms_dis:
+                ev.append("MS usage " + ", ".join(ms_dis[:3]))
             if hint_hits:
                 ev.append("supporting MS signals " + _quote_list(hint_hits, 4))
             extra = f" Weaker conflicting signal: {noise_meaning}." if noise_meaning else ""
@@ -1633,7 +1711,7 @@ class EntityClassifier:
                 conf -= 0.08
             res.confidence = conf = _clip(conf, hi=0.88)
             extra = f" Other condition also mentioned: {_quote_list(other_hits, 2)}." if other_hits else ""
-            weak_ms = f" A weak 'ms' mention ({', '.join(ms_named[:2])}) supports it." if ms_named else ""
+            weak_ms = f" A weak 'ms' mention ({', '.join(ms_dis[:2])}) supports it." if ms_dis else ""
             res.reason = (f"{B['GENERAL_MS']}: no drug is mentioned and 'multiple sclerosis' is not "
                           f"written out, but the post uses MS-specific clinical / symptom language: "
                           f"{_quote_list(hint_hits, 5)}.{weak_ms}{extra}{dropped_txt} Confidence {conf:.2f} "
@@ -1646,7 +1724,7 @@ class EntityClassifier:
             conf = _clip(0.50 + 0.25 * math.tanh((ms_evidence + hint - 2) / 4.0), hi=0.80)
             res.confidence = conf
             res.reason = (f"{B['GENERAL_MS']}: no drug is mentioned; an ambiguous 'ms' "
-                          f"({', '.join(ms_named[:2])}) together with MS-related words "
+                          f"({', '.join(ms_dis[:2])}) together with MS-related words "
                           f"{_quote_list(hint_hits, 4)} points to the disease.{dropped_txt} "
                           f"Confidence {conf:.2f} ({_level(conf)}): weak but consistent MS evidence.")
             return res
@@ -1772,7 +1850,9 @@ def process_dataframe(df, text_column: Optional[str] = None,
     log.info("Classified %d posts in %.1fs", len(df), time.time() - t0)
 
     out = df.copy()
-    pos = list(out.columns).index(col) + 1
+    # v2: output columns go AFTER all original columns (they used to be inserted
+    # right after the text column, which pushed e.g. "Sentiment" behind "Reason").
+    pos = len(out.columns)
     out.insert(pos, CLEAN_TEXT_COLUMN, cleaned)
     out.insert(pos + 1, BUCKET_COLUMN, [r.bucket for r in results])
     extra = pd.DataFrame([r.as_row() for r in results], index=out.index)
@@ -1940,6 +2020,29 @@ SELFTEST_CASES: List[Tuple[str, str, Optional[str]]] = [
     ("interferon for my hepatitis C finally finished", "NOISE", ""),
     ("15 years on interferon for my MS before switching", "COMP_ONLY", "Interferon beta (generic)"),
     ("Avonex shots every week made me feel like flu", "COMP_ONLY", "Avonex"),
+    # ---- v2 regression cases (paraphrased from errors found in validation) ----
+    # 'it' / 'me' are ordinary words, not "MS in IT" (Master's)
+    ("Nerve damage from low B12 can mimic MS. It is a different disease entirely.", "GENERAL_MS", ""),
+    ("If everyone around here has MS, it will cost billions.", "GENERAL_MS", ""),
+    ("Got the admit for MS IT at the university, fall intake", "NOISE", ""),
+    # a title elsewhere must not cancel "suffers from MS"
+    ("Ms Carter suffers from MS and the airline ignored it", "GENERAL_MS", ""),
+    # IFN-gamma is a cytokine, not interferon beta
+    ("Patients showed lower IFN-γ and IL-17 levels; EBV is tied to multiple sclerosis", "GENERAL_MS", ""),
+    # short forms need treatment words right next to them
+    ("Wheelchair users with advanced multiple sclerosis can't ride it, it is just 'cool tec.' to them",
+     "GENERAL_MS", ""),
+    ("Two years on tec now, my neuro is happy", "COMP_ONLY", "Tecfidera"),
+    # MS-specific brand is not off-label because another drug's disease is nearby
+    ("Pharma sales were led by the multiple myeloma drug Darzalex and Novartis's Kesimpta",
+     "COMP_ONLY", "Kesimpta"),
+    ("ofatumumab for CLL patients, cycle 2 today", "NOISE", ""),
+    # implicit MS: trial / progression language, "therapies" plural
+    ("CAR-T readout: most participants had stable disability scores despite documented progression "
+     "on high-efficacy therapies", "GENERAL_MS", ""),
+    # transverse myelitis alone is not MS
+    ("Remember when the first transverse myelitis cases after the shots were called coincidence?",
+     "NOISE", ""),
 ]
 
 
@@ -1966,10 +2069,10 @@ def selftest(verbose: bool = True) -> bool:
 # ----------------------------------------------------------------------------
 def main() -> int:
     # ============================ YOUR INPUTS ============================
-    INPUT_FILE = r"Data\Unique_twiter_data_only_for_MS.xlsx"          # .xlsx / .xls / .csv
-    OUTPUT_FILE = None                   # None -> "<input>_classified.xlsx"
-    TEXT_COLUMN = INPUT_TEXT_COLUMN      # e.g. "Post Content"; None = auto-detect
-    SHEET_NAME = None                    # None -> first sheet
+    INPUT_FILE = r"Data/Unique_twiter_data_only_for_MS.xlsx"   # .xlsx / .xls / .csv
+    OUTPUT_FILE = r"Output/Unique_twiter_data_only_for_MS_classified_v2.xlsx"
+    TEXT_COLUMN = "Message"              # e.g. "Post Content"; None = auto-detect
+    SHEET_NAME = "Sheet1"                # None -> first sheet
     MAX_ROWS = None                      # e.g. 100 for a quick trial run
     RUN_SELFTEST = False                 # True -> run built-in test cases only
     SINGLE_TEXT = None                   # e.g. "Had my Ocrevus infusion today"
