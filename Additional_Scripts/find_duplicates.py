@@ -71,8 +71,8 @@ from rapidfuzz.distance import Indel
 # =========================================================================
 # EDIT THESE PATHS
 # =========================================================================
-INPUT_FILE_PATH = r"Sprinklr_MS_Raw_Data\QuickSearch (2)\Whatarethemostrecentposts_b8e0b3b6-bd01-47ac-8402-977a724376b1_1.xlsx"  # .csv or .xlsx/.xls/.xlsm
-OUTPUT_FILE_PATH = "Output/Cleaned_unique_twitter_data_MS_new_logic.xlsx"   # the 3-tab result file
+INPUT_FILE_PATH = r"Sprinklr_Raw_Data_Month_Wise\Consolidated_Master_Data.xlsx"
+OUTPUT_FILE_PATH = "Output/Entire data output/Splited_unique_duplicate_twitter_data_MS.xlsx"   # the 3-tab result file
 SHEET_NAME = 0   # Excel input only: sheet name (e.g. "Sheet1") or 0 = first sheet
 # =========================================================================
 

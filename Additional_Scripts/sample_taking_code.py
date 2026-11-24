@@ -5,17 +5,27 @@ import math
 # GLOBAL VARIABLES
 # ==========================================
 # Total number of sample rows you want to extract
-TOTAL_SAMPLE_SIZE = 500 
+TOTAL_SAMPLE_SIZE = 5000 
 
 # File path and Column details
-INPUT_FILE = 'Unique_twiter_data_only_for_MS.xlsx'
-SENTIMENT_COLUMN = 'Sentiment'
+INPUT_FILE = r"Output\Entire data output\Unique_twiter_data_only_for_MS_classified.xlsx"
+SENTIMENT_COLUMN = 'Entity Bucket'
+
+# Entity Bucket
+# Ocrevus Only
+# Ocrevus vs. Competitor
+# Competitor Only
+# General MS (No Drug)
+# Noise / Others
+
 
 # Define the percentage distribution (Must add up to 1.0 / 100%)
 SAMPLING_PERCENTAGES = {
-    'POSITIVE': 0.40,  # 40%
-    'NEGATIVE': 0.40,  # 40%
-    'NEUTRAL': 0.20    # 20%
+    'Ocrevus Only': 0.20,          # 30%
+    'Ocrevus vs. Competitor': 0.20, # 25%
+    'Competitor Only': 0.20,       # 20%
+    'General MS (No Drug)': 0.20,   # 15%
+    'Noise / Others': 0.20         # 10%
 }
 
 # ==========================================
@@ -91,7 +101,7 @@ if __name__ == "__main__":
     sampled_data = extract_stratified_sample(INPUT_FILE)
     
     # Define output file name
-    output_file = 'Sampled_Twitter_Data_500.xlsx'
+    output_file = r'Output\Entire data output\Sample_data_2000_MS_classified.xlsx'
     
     # Save the sampled data to a new Excel file
     sampled_data.to_excel(output_file, index=False)

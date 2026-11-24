@@ -66,12 +66,12 @@ RETRY_DELAY_SECONDS = 5.0
 
 # File & dataset configuration
 BASE_DIR = Path(__file__).resolve().parent
-INPUT_FILENAME = str(BASE_DIR / "Data" / "Unique_twiter_data_only_for_MS_classified_v2.xlsx")
-SHEET_NAME = "Classified"
-POST_ID_COLUMN = "Post_ID"
+INPUT_FILENAME = str(BASE_DIR / "Output" / "Entire data output/Sample_data_5000_MS_classified.xlsx")
+SHEET_NAME = "Sheet1"
+POST_ID_COLUMN = "Post ID"
 TEXT_COLUMN = "Message"
-OUTPUT_FILENAME = str(BASE_DIR / "Output" / "output_ocrevus_ms_social_listening_classified.xlsx")
-PROMPT_FILE_PATH = str(BASE_DIR / "prompts" / "new_MS_ocrevus_topic_sentiment_voice_system_prompt.md")
+OUTPUT_FILENAME = str(BASE_DIR / "Output" / "Entire data output/output_ocrevus_ms_social_listening_classified_new_5000_data.xlsx")
+PROMPT_FILE_PATH = str(BASE_DIR / "prompts" / "MS_ocrevus_topic_sentiment_voice_system_prompt_v3.md")
 
 
 # Optional metadata columns that are attached to each post inside the prompt.
@@ -276,7 +276,7 @@ def load_input_data(
     # Store original input file columns for the final export selection
     df.attrs["input_columns"] = list(df.columns)
 
-    # df = df.head(20)
+    df = df.head(10)
 
     for optional_col in (ENTITY_BUCKET_COLUMN, DRUG_MENTIONS_COLUMN):
         if optional_col not in df.columns:

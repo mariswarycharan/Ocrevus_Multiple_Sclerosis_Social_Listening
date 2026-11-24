@@ -372,15 +372,6 @@ Expected output:
     "Theme": "Ocrevus vs Briumvi Efficacy Claim",
     "Justification": "An investor post uses long-term data to claim Briumvi is better than Ocrevus and Kesimpta, so the comparison is the main point. The data is used to rank brands rather than report a readout, so topic 8 is rejected. Ocrevus is portrayed as inferior, which is negative for Ocrevus and positive for the competitor."
   }},
-  "A3": {{
-    "Speaker_Voice": "Unknown",
-    "Ocrevus_Sentiment": "Not Applicable",
-    "Competitor_Sentiment": "Not Applicable",
-    "MS_Sentiment": "Negative",
-    "Topic": "5. Unmet Needs & Care Gaps",
-    "Theme": "Mocking MS Patients Stigma",
-    "Justification": "The author sarcastically calls MS a 'made-up disease' and mocks the patient's symptoms, which is emotional dismissal and stigma faced by people with MS. It mocks rather than debates the diagnosis itself, so topic 9 is rejected."
-  }}
 }}
 
 FINAL REMINDER: Classify every post independently using ALL rules above. Return ONLY the JSON object, with one entry per post_id, seven keys per entry, and allowed values only.

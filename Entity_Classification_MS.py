@@ -152,6 +152,9 @@ LOW_CONFIDENCE_THRESHOLD = 0.75       # rows below go to "Low Confidence Review"
 # for the bucket. Should they still be listed in "Drug Mentions"?
 DRUG_MENTIONS_INCLUDE_NON_MS_USE = False
 
+INPUT_COLUMNS_TO_KEEP: Optional[List[str]] = ['Post ID', 'Group_ID','Repeated_Count', 'SenderUserId', 'SenderScreenName' ,'SenderProfileLink', 'Sender Followers Count'
+         , 'SenderInfluencerScore', 'SenderAge', 'SenderGender', 'CreatedTime','CountryCode','Message' ,'Sentiment',]
+
 # ------------------------------------------------------------ 2. BUCKETS ----
 BUCKETS = {
     "OUR_ONLY":    f"{OUR_BRAND_LABEL} Only",
@@ -1849,7 +1852,17 @@ def process_dataframe(df, text_column: Optional[str] = None,
             log.info("  %d / %d posts done", i, len(df))
     log.info("Classified %d posts in %.1fs", len(df), time.time() - t0)
 
-    out = df.copy()
+        # Keep only the requested input columns (None / [] = keep all)
+    if INPUT_COLUMNS_TO_KEEP:
+        wanted = {str(c).strip().lower() for c in INPUT_COLUMNS_TO_KEEP}
+        keep_cols = [c for c in df.columns if str(c).strip().lower() in wanted]
+        missing = wanted - {str(c).strip().lower() for c in keep_cols}
+        if missing:
+            log.warning("INPUT_COLUMNS_TO_KEEP: columns not found in input: %s",
+                        sorted(missing))
+        out = df[keep_cols].copy()
+    else:
+        out = df.copy()
     # v2: output columns go AFTER all original columns (they used to be inserted
     # right after the text column, which pushed e.g. "Sentiment" behind "Reason").
     pos = len(out.columns)
@@ -2069,10 +2082,10 @@ def selftest(verbose: bool = True) -> bool:
 # ----------------------------------------------------------------------------
 def main() -> int:
     # ============================ YOUR INPUTS ============================
-    INPUT_FILE = r"Data/Unique_twiter_data_only_for_MS.xlsx"   # .xlsx / .xls / .csv
-    OUTPUT_FILE = r"Output/Unique_twiter_data_only_for_MS_classified_v2.xlsx"
+    INPUT_FILE = r"Output/Entire data output/Splited_unique_duplicate_twitter_data_MS.xlsx"   # .xlsx / .xls / .csv
+    OUTPUT_FILE = r"Output/Entire data output/Unique_twiter_data_only_for_MS_classified.xlsx"
     TEXT_COLUMN = "Message"              # e.g. "Post Content"; None = auto-detect
-    SHEET_NAME = "Sheet1"                # None -> first sheet
+    SHEET_NAME = "Unique"                # None -> first sheet
     MAX_ROWS = None                      # e.g. 100 for a quick trial run
     RUN_SELFTEST = False                 # True -> run built-in test cases only
     SINGLE_TEXT = None                   # e.g. "Had my Ocrevus infusion today"
